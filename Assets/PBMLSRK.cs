@@ -12,7 +12,7 @@ using System.Collections.Generic;
 using static Unity.Mathematics.math;
 
 public class PBMLSRK : MonoBehaviour {
-
+    
     public struct Particle {
         public float2 x;
         public float2 v;
@@ -117,97 +117,15 @@ public class PBMLSRK : MonoBehaviour {
             mouse_force = delta * mouse_spring - pi.v * mouse_damp;
         }
 
-        // main MLSRK jobs
-        new GetCorrectionCoefficient() { ps = ps, neighbour_idxs = neighbour_idxs }.Schedule(num_particles, division).Complete();
+        // MLSRK jobs
         // you could split this job up much more for speed and do some sections in parallel, i've just kept it serial for ease of reading
         new MLSRKSim() { ps = ps, neighbour_idxs = neighbour_idxs, mouse_force = mouse_force, selected_idx = selected_idx }.Schedule().Complete();
     }
 
     #region MLSRK Jobs
-    [BurstCompile]
-    struct GetCorrectionCoefficient : IJobParallelFor {
-        /* Find neighborhood particles inside kernel support range;
-           calculate MLSRK correction coefficient b and its gradient for
-           the particle neighborhood from Eqn. (8); */
-
-        [NativeDisableParallelForRestriction] public NativeArray<Particle> ps;
-        [NativeDisableParallelForRestriction] public NativeArray<int> neighbour_idxs;
-
-        public void Execute(int i) {
-            var pi = ps[i];
-
-            float3x3 M = 0;
-            float3x3 dMx = 0;
-            float3x3 dMy = 0;
-
-            // constant derivatives of basis function
-            float3 dhx = float3(0, 1, 0);
-            float3 dhy = float3(0, 0, 1);
-
-            int num_neighbours = 0;
-            for (int j = 0; j < ps.Length; j++) {
-                var pj = ps[j];
-
-                var delta = pj.x - pi.x;
-                if (length(delta) < 1.5f * a) {
-                    var idx = i * max_neighbours + num_neighbours;
-                    neighbour_idxs[idx] = j;
-
-                    // equation 8 for Ni(x_j)
-                    var dx = (pj.x - pi.x) / a;
-                    // linear basis function
-                    float3 h = float3(1, dx.x, dx.y);
-                    var Φi = Φ(dx);
-                    var gradΦ = dΦ(dx);
-
-                    M += outer_product(h, h) * Φi * pj.volume;
-
-                    // from appendix
-                    dMx += (outer_product(dhx, h) * Φi + outer_product(h, dhx) * Φi + outer_product(h, h) * gradΦ.x) * pj.volume;
-                    dMy += (outer_product(dhy, h) * Φi + outer_product(h, dhy) * Φi + outer_product(h, h) * gradΦ.y) * pj.volume;
-
-                    ++num_neighbours;
-                }
-            }
-            pi.num_neighbours = num_neighbours;
-
-            dMx /= -a;
-            dMy /= -a;
-
-            // regularization from the paper stabilises simulation and ensures matrices can be safely inverted etc, it's like adding an epsilon
-            const float regularization = 0.001f;
-            var Mr = pow(a, 2) * float3x3(
-                0, 0, 0,
-                0, regularization, 0,
-                0, 0, regularization
-            );
-            M += Mr;
-
-            var M_inv = inverse(M);
-
-            // linear basis function at 0
-            float3 h0 = float3(1, 0, 0);
-            var b = mul(h0, M_inv);
-
-            var dMx_inv = mul(-M_inv, mul(dMx, M_inv));
-            var dMy_inv = mul(-M_inv, mul(dMy, M_inv));
-
-            var dbx = mul(h0, dMx_inv);
-            var dby = mul(h0, dMy_inv);
-
-            pi.dbx = dbx;
-            pi.dby = dby;
-
-            pi.b = b;
-            ps[i] = pi;
-        }
-    }
     
     [BurstCompile]
     struct MLSRKSim : IJob {
-        /* calculate velocity gradient ∇u from Eqn. (18), update
-            deformation gradient F_n+1 = (I + (∇u_n+1 )^T Δt)F_n
-            following Eqn. (17); */
 
         [NativeDisableParallelForRestriction] public NativeArray<Particle> ps;
         [NativeDisableParallelForRestriction] public NativeArray<int> neighbour_idxs;
@@ -216,6 +134,83 @@ public class PBMLSRK : MonoBehaviour {
         public float2 mouse_force;
 
         public void Execute() {
+
+            /* Find neighborhood particles inside kernel support range;
+            calculate MLSRK correction coefficient b and its gradient for
+            the particle neighborhood from Eqn. (8); */
+            for (int i = 0; i < ps.Length; i++) {
+                var pi = ps[i];
+
+                float3x3 M = 0;
+                float3x3 dMx = 0;
+                float3x3 dMy = 0;
+
+                // constant derivatives of basis function
+                float3 dhx = float3(0, 1, 0);
+                float3 dhy = float3(0, 0, 1);
+
+                int num_neighbours = 0;
+                for (int j = 0; j < ps.Length; j++) {
+                    var pj = ps[j];
+
+                    var delta = pj.x - pi.x;
+                    if (length(delta) < 1.5f * a) {
+                        var idx = i * max_neighbours + num_neighbours;
+                        neighbour_idxs[idx] = j;
+
+                        // equation 8 for Ni(x_j)
+                        var dx = (pj.x - pi.x) / a;
+                        // linear basis function
+                        float3 h = float3(1, dx.x, dx.y);
+                        var Φi = Φ(dx);
+                        var gradΦ = dΦ(dx);
+
+                        M += outer_product(h, h) * Φi * pj.volume;
+
+                        // from appendix
+                        dMx += (outer_product(dhx, h) * Φi + outer_product(h, dhx) * Φi + outer_product(h, h) * gradΦ.x) * pj.volume;
+                        dMy += (outer_product(dhy, h) * Φi + outer_product(h, dhy) * Φi + outer_product(h, h) * gradΦ.y) * pj.volume;
+
+                        ++num_neighbours;
+                    }
+                }
+                pi.num_neighbours = num_neighbours;
+
+                dMx /= -a;
+                dMy /= -a;
+
+                // regularization from the paper stabilises simulation and ensures matrices can be safely inverted etc, it's like adding an epsilon
+                const float regularization = 0.001f;
+                var Mr = pow(a, 2) * float3x3(
+                    0, 0, 0,
+                    0, regularization, 0,
+                    0, 0, regularization
+                );
+                M += Mr;
+
+                var M_inv = inverse(M);
+
+                // linear basis function at 0
+                float3 h0 = float3(1, 0, 0);
+                var b = mul(h0, M_inv);
+
+                var dMx_inv = mul(-M_inv, mul(dMx, M_inv));
+                var dMy_inv = mul(-M_inv, mul(dMy, M_inv));
+
+                var dbx = mul(h0, dMx_inv);
+                var dby = mul(h0, dMy_inv);
+
+                pi.dbx = dbx;
+                pi.dby = dby;
+
+                pi.b = b;
+                ps[i] = pi;
+            }
+
+            /* calculate velocity gradient ∇u from Eqn. (18), update
+            deformation gradient F_n+1 = (I + (∇u_n+1 )^T Δt)F_n
+            following Eqn. (17); */
+
             // calculate stress per-particle
             for (int i = 0; i < ps.Length; i++) {
                 var pi = ps[i];
