@@ -23,12 +23,15 @@
             // matches the structure of our data on the CPU side
             struct Particle {
                 float2 x;
+                float2 xPrev;
+                float2 xDelta;
                 float2 v;
                 float2 f;
                 float mass;
                 float volume;
                 int num_neighbours;
                 float2x2 F;
+                float2x2 Z;
                 float3 b;
                 float3 dbx;
                 float3 dby;

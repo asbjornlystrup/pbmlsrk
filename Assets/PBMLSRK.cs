@@ -15,12 +15,15 @@ public class PBMLSRK : MonoBehaviour {
     
     public struct Particle {
         public float2 x;
+        public float2 xPrev;
+        public float2 xDelta;
         public float2 v;
         public float2 f;
         public float mass;
         public float volume;
         public int num_neighbours;
         public float2x2 F; // deformation gradient
+        public float2x2 Z; // Asbj: a deformation gradient between previous and current positions
         public float3 b; // used for polynomial interpolation (equation 5)
         public float3 dbx; // dbx, dby are derivatives of above
         public float3 dby; 
@@ -135,6 +138,39 @@ public class PBMLSRK : MonoBehaviour {
 
         public void Execute() {
 
+            // PBD - position prediction step
+            for (int i = 0; i < ps.Length; i++) {
+                var pi = ps[i];
+
+                // external forces and interactivity
+                var g = f_ext;
+                if (i == selected_idx) {
+                    g += mouse_force;
+                }
+
+                pi.xPrev = pi.x;
+                pi.xDelta = float2(0, 0);
+
+                // Predict position
+                pi.x += pi.v * dt + g * dt * dt;
+
+                // boundary conditions
+                if (pi.x.x < soft_wall_min) {
+                    pi.x.x = soft_wall_min;
+                }
+                if (pi.x.x > soft_wall_max) {
+                    pi.x.x = soft_wall_max;
+                }
+                if (pi.x.y < soft_wall_min) {
+                    pi.x.y = soft_wall_min;
+                }
+                if (pi.x.y > soft_wall_max) {
+                    pi.x.y = soft_wall_max;
+                }
+
+                ps[i] = pi;
+            }
+
             /* Find neighborhood particles inside kernel support range;
             calculate MLSRK correction coefficient b and its gradient for
             the particle neighborhood from Eqn. (8); */
@@ -148,6 +184,9 @@ public class PBMLSRK : MonoBehaviour {
                 // constant derivatives of basis function
                 float3 dhx = float3(0, 1, 0);
                 float3 dhy = float3(0, 0, 1);
+
+                float2x2 P = float2x2(0, 0, 0, 0);
+                float2x2 Q = float2x2(0, 0, 0, 0);
 
                 int num_neighbours = 0;
                 for (int j = 0; j < ps.Length; j++) {
@@ -172,9 +211,36 @@ public class PBMLSRK : MonoBehaviour {
                         dMy += (outer_product(dhy, h) * Φi + outer_product(h, dhy) * Φi + outer_product(h, h) * gradΦ.y) * pj.volume;
 
                         ++num_neighbours;
+
+                        if (length(pj.xPrev - pi.xPrev) < 1.5f * a) {
+                            float2 d = pj.x - pi.x;
+                            float2 r = pj.xPrev - pi.xPrev;
+
+                            float weight = 1.0f; // * Φ(dx);
+                            P += float2x2(
+                                d.x * r.x, d.x * r.y,
+                                d.y * r.x, d.y * r.y
+                            ) * weight;
+                            Q += float2x2(
+                                r.x * r.x, r.x * r.y,
+                                r.y * r.x, r.y * r.y
+                            ) * weight;
+                        }
                     }
                 }
                 pi.num_neighbours = num_neighbours;
+
+                float2 dir = float2(P.c0.x + P.c1.y, P.c0.y - P.c1.x); // Shape matching direction. We use shape matching as a fallback. Not sure it's necessary here though.
+                dir = length(dir) == 0 ? float2(1, 0) : normalize(dir);
+                float2x2 shapeMatchingR = float2x2( // Shape matching rotation matrix.
+                    dir.x, -dir.y,
+                    dir.y,  dir.x
+                );
+                float detQ = determinant(Q);
+                float2x2 Z = (detQ <= 0.0001) ? shapeMatchingR : mul(P, inverse(Q));
+                float squaredFrobeniusNorm = Z.c0.x * Z.c0.x + Z.c0.y * Z.c0.y + Z.c1.x * Z.c1.x + Z.c1.y * Z.c1.y;
+                if (squaredFrobeniusNorm <= 0) Z = shapeMatchingR; // Fall back to shape matching. Might not be necessary though.
+                pi.Z = Z;
 
                 dMx /= -a;
                 dMy /= -a;
@@ -233,6 +299,7 @@ public class PBMLSRK : MonoBehaviour {
 
                 float2 f = 0;
                 float m = 0;
+                float2 distributionDelta = float2(0, 0);
                 
                 for (int k = 0; k < pi.num_neighbours; ++k) {
                     var idx_into_neighbours = i * max_neighbours + k;
@@ -255,31 +322,26 @@ public class PBMLSRK : MonoBehaviour {
                     f += -mul(dN, σj * pj.volume);
                     var rho_j = pj.mass / pj.volume;
                     m += N * rho_j * pj.volume;
+
+                    if (length(pi.x - pj.x) < 1.5f * a && length(pi.xPrev - pj.xPrev) < 1.5f * a) {
+                        // Asbj: I use particle centers as center of mass, though it's not really correct, but it means we don't need to compute the mass centers.
+                        float2 combinedDelta = (mul(pj.Z, pi.xPrev - pj.xPrev) - mul(pi.Z, pj.xPrev - pi.xPrev)) * 0.5f - (pi.x - pj.x);
+                        distributionDelta += combinedDelta * 2.0f * 0.15f * Φ(dx);
+                    }
                 }
 
-                // interactivity
-                var g = f_ext;
-                if (i == selected_idx) {
-                    g += mouse_force;
-                }
-                pi.v += (f / m + g) * dt;
+                pi.xDelta += (f / m) * dt * dt;
+                pi.xDelta += distributionDelta;
 
-                // boundary conditions - simple soft hookean springs
-                const float wall_spring = 0.5f;
-                const float wall_damp = 0.2f;
-                if (pi.x.x < soft_wall_min) {
-                    pi.v.x += (soft_wall_min - pi.x.x) * wall_spring - pi.v.x * wall_damp;
-                }
-                if (pi.x.x > soft_wall_max) {
-                    pi.v.x += (soft_wall_max - pi.x.x) * wall_spring - pi.v.x * wall_damp;
-                }
-                if (pi.x.y < soft_wall_min) {
-                    pi.v.y += (soft_wall_min - pi.x.y) * wall_spring - pi.v.y * wall_damp;
-                    //pi.v.x = 0; // Asbj: I commented out this from nialltl's version so I don't have to add friction in the PBD version.
-                }
-                if (pi.x.y > soft_wall_max) {
-                    pi.v.y += (soft_wall_max - pi.x.y) * wall_spring - pi.v.y * wall_damp;
-                }
+                ps[i] = pi;
+            }
+
+            // PBD - update velocity.
+            for (int i = 0; i < ps.Length; i++) {
+                var pi = ps[i];
+
+                pi.x += pi.xDelta;
+                pi.v = (pi.x - pi.xPrev) / dt;
 
                 ps[i] = pi;
             }
@@ -294,7 +356,7 @@ public class PBMLSRK : MonoBehaviour {
                 var dby = pi.dby;
 
                 float2x2 du = 0;
-                float2 u_h = 0;
+                //float2 u_h = 0;
 
                 for (int k = 0; k < pi.num_neighbours; ++k) {
                     var idx_into_neighbours = i * max_neighbours + k;
@@ -312,10 +374,10 @@ public class PBMLSRK : MonoBehaviour {
                     du += outer_product(dN, pj.v);
                     
                     // calculating u_h(xi) for equation 12 velocity blending
-                    u_h += N * pj.v;
+                    //u_h += N * pj.v;
                 }
 
-                pi.u_h = u_h;
+                //pi.u_h = u_h;
 
                 // update deformation gradient
                 pi.F += mul(transpose(du), pi.F) * dt;
@@ -323,18 +385,9 @@ public class PBMLSRK : MonoBehaviour {
                 ps[i] = pi;
             }
             
-            // integrate position forward
+            // update volume
             for (int i = 0; i < ps.Length; i++) {
                 var pi = ps[i];
-
-                var u_h = pi.u_h;
-
-                // update position using eq 12 - this is like PIC/FLIP blending,
-                // where pi.v is the raw particle velocity and u_h is the 'grid' velocity - obvs there's no grid but it's like a smoothed node position
-                const float blend_alpha = 0.95f;
-                var u_tilde = blend_alpha * pi.v + (1.0f - blend_alpha) * u_h;
-                pi.x += u_h * dt;
-                pi.v = u_tilde;
 
                 // update per-particle volume. this is a simplified version of the C implementation, it's not great - will gain volume with large deformations
                 // see the text below equation 19 in the paper for a corrected volume / deformation gradient update scheme, more important for fluids and granular materials
