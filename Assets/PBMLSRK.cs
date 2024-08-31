@@ -171,176 +171,187 @@ public class PBMLSRK : MonoBehaviour {
                 ps[i] = pi;
             }
 
-            /* Find neighborhood particles inside kernel support range;
-            calculate MLSRK correction coefficient b and its gradient for
-            the particle neighborhood from Eqn. (8); */
-            for (int i = 0; i < ps.Length; i++) {
-                var pi = ps[i];
+            int iterations = 1;
 
-                float3x3 M = 0;
-                float3x3 dMx = 0;
-                float3x3 dMy = 0;
+            for (int iteration = 0; iteration < iterations; iteration++) {
 
-                // constant derivatives of basis function
-                float3 dhx = float3(0, 1, 0);
-                float3 dhy = float3(0, 0, 1);
+                /* Find neighborhood particles inside kernel support range;
+                calculate MLSRK correction coefficient b and its gradient for
+                the particle neighborhood from Eqn. (8); */
+                for (int i = 0; i < ps.Length; i++) {
+                    var pi = ps[i];
 
-                float2x2 P = float2x2(0, 0, 0, 0);
-                float2x2 Q = float2x2(0, 0, 0, 0);
+                    float3x3 M = 0;
+                    float3x3 dMx = 0;
+                    float3x3 dMy = 0;
 
-                int num_neighbours = 0;
-                for (int j = 0; j < ps.Length; j++) {
-                    var pj = ps[j];
+                    // constant derivatives of basis function
+                    float3 dhx = float3(0, 1, 0);
+                    float3 dhy = float3(0, 0, 1);
 
-                    var delta = pj.x - pi.x;
-                    if (length(delta) < 1.5f * a) {
-                        var idx = i * max_neighbours + num_neighbours;
-                        neighbour_idxs[idx] = j;
+                    float2x2 P = float2x2(0, 0, 0, 0);
+                    float2x2 Q = float2x2(0, 0, 0, 0);
 
-                        // equation 8 for Ni(x_j)
-                        var dx = (pj.x - pi.x) / a;
-                        // linear basis function
-                        float3 h = float3(1, dx.x, dx.y);
-                        var Φi = Φ(dx);
-                        var gradΦ = dΦ(dx);
+                    int num_neighbours = 0;
+                    for (int j = 0; j < ps.Length; j++) {
+                        var pj = ps[j];
 
-                        M += outer_product(h, h) * Φi * pj.volume;
+                        var delta = pj.x - pi.x;
+                        if (length(delta) < 1.5f * a) {
+                            var idx = i * max_neighbours + num_neighbours;
+                            neighbour_idxs[idx] = j;
 
-                        // from appendix
-                        dMx += (outer_product(dhx, h) * Φi + outer_product(h, dhx) * Φi + outer_product(h, h) * gradΦ.x) * pj.volume;
-                        dMy += (outer_product(dhy, h) * Φi + outer_product(h, dhy) * Φi + outer_product(h, h) * gradΦ.y) * pj.volume;
+                            // equation 8 for Ni(x_j)
+                            var dx = (pj.x - pi.x) / a;
+                            // linear basis function
+                            float3 h = float3(1, dx.x, dx.y);
+                            var Φi = Φ(dx);
+                            var gradΦ = dΦ(dx);
 
-                        ++num_neighbours;
+                            M += outer_product(h, h) * Φi * pj.volume;
 
-                        if (length(pj.xPrev - pi.xPrev) < 1.5f * a) {
-                            float2 d = pj.x - pi.x;
-                            float2 r = pj.xPrev - pi.xPrev;
+                            // from appendix
+                            dMx += (outer_product(dhx, h) * Φi + outer_product(h, dhx) * Φi + outer_product(h, h) * gradΦ.x) * pj.volume;
+                            dMy += (outer_product(dhy, h) * Φi + outer_product(h, dhy) * Φi + outer_product(h, h) * gradΦ.y) * pj.volume;
 
-                            float weight = 1.0f; // * Φ(dx);
-                            P += float2x2(
-                                d.x * r.x, d.x * r.y,
-                                d.y * r.x, d.y * r.y
-                            ) * weight;
-                            Q += float2x2(
-                                r.x * r.x, r.x * r.y,
-                                r.y * r.x, r.y * r.y
-                            ) * weight;
+                            ++num_neighbours;
+
+                            if (length(pj.xPrev - pi.xPrev) < 1.5f * a) {
+                                float2 d = pj.x - pi.x;
+                                float2 r = pj.xPrev - pi.xPrev;
+
+                                float weight = 1.0f; // * Φ(dx);
+                                P += float2x2(
+                                    d.x * r.x, d.x * r.y,
+                                    d.y * r.x, d.y * r.y
+                                ) * weight;
+                                Q += float2x2(
+                                    r.x * r.x, r.x * r.y,
+                                    r.y * r.x, r.y * r.y
+                                ) * weight;
+                            }
                         }
                     }
+                    pi.num_neighbours = num_neighbours;
+
+                    float2 dir = float2(P.c0.x + P.c1.y, P.c0.y - P.c1.x); // Shape matching direction. We use shape matching as a fallback. Not sure it's necessary here though.
+                    dir = length(dir) == 0 ? float2(1, 0) : normalize(dir);
+                    float2x2 shapeMatchingR = float2x2( // Shape matching rotation matrix.
+                        dir.x, -dir.y,
+                        dir.y,  dir.x
+                    );
+                    float detQ = determinant(Q);
+                    float2x2 Z = (detQ <= 0.0001) ? shapeMatchingR : mul(P, inverse(Q));
+                    float squaredFrobeniusNorm = Z.c0.x * Z.c0.x + Z.c0.y * Z.c0.y + Z.c1.x * Z.c1.x + Z.c1.y * Z.c1.y;
+                    if (squaredFrobeniusNorm <= 0) Z = shapeMatchingR; // Fall back to shape matching. Might not be necessary though.
+                    pi.Z = Z;
+
+                    dMx /= -a;
+                    dMy /= -a;
+
+                    // regularization from the paper stabilises simulation and ensures matrices can be safely inverted etc, it's like adding an epsilon
+                    const float regularization = 0.001f;
+                    var Mr = pow(a, 2) * float3x3(
+                        0, 0, 0,
+                        0, regularization, 0,
+                        0, 0, regularization
+                    );
+                    M += Mr;
+
+                    var M_inv = inverse(M);
+
+                    // linear basis function at 0
+                    float3 h0 = float3(1, 0, 0);
+                    var b = mul(h0, M_inv);
+
+                    var dMx_inv = mul(-M_inv, mul(dMx, M_inv));
+                    var dMy_inv = mul(-M_inv, mul(dMy, M_inv));
+
+                    var dbx = mul(h0, dMx_inv);
+                    var dby = mul(h0, dMy_inv);
+
+                    pi.dbx = dbx;
+                    pi.dby = dby;
+
+                    pi.b = b;
+                    ps[i] = pi;
                 }
-                pi.num_neighbours = num_neighbours;
 
-                float2 dir = float2(P.c0.x + P.c1.y, P.c0.y - P.c1.x); // Shape matching direction. We use shape matching as a fallback. Not sure it's necessary here though.
-                dir = length(dir) == 0 ? float2(1, 0) : normalize(dir);
-                float2x2 shapeMatchingR = float2x2( // Shape matching rotation matrix.
-                    dir.x, -dir.y,
-                    dir.y,  dir.x
-                );
-                float detQ = determinant(Q);
-                float2x2 Z = (detQ <= 0.0001) ? shapeMatchingR : mul(P, inverse(Q));
-                float squaredFrobeniusNorm = Z.c0.x * Z.c0.x + Z.c0.y * Z.c0.y + Z.c1.x * Z.c1.x + Z.c1.y * Z.c1.y;
-                if (squaredFrobeniusNorm <= 0) Z = shapeMatchingR; // Fall back to shape matching. Might not be necessary though.
-                pi.Z = Z;
+                /* calculate velocity gradient ∇u from Eqn. (18), update
+                deformation gradient F_n+1 = (I + (∇u_n+1 )^T Δt)F_n
+                following Eqn. (17); */
 
-                dMx /= -a;
-                dMy /= -a;
+                // calculate stress per-particle
+                for (int i = 0; i < ps.Length; i++) {
+                    var pi = ps[i];
 
-                // regularization from the paper stabilises simulation and ensures matrices can be safely inverted etc, it's like adding an epsilon
-                const float regularization = 0.001f;
-                var Mr = pow(a, 2) * float3x3(
-                    0, 0, 0,
-                    0, regularization, 0,
-                    0, 0, regularization
-                );
-                M += Mr;
+                    var F = pi.F;
+                    var J = determinant(F);
+                    var FFT = mul(F, transpose(F));
+                    var I = float2x2(1, 0, 0, 1);
 
-                var M_inv = inverse(M);
+                    // eq. 22
+                    var σ = (1.0f / J) * (mu * (FFT - I) + lambda * log(J) * I);
+                    pi.σ = σ;
 
-                // linear basis function at 0
-                float3 h0 = float3(1, 0, 0);
-                var b = mul(h0, M_inv);
+                    ps[i] = pi;
+                }
 
-                var dMx_inv = mul(-M_inv, mul(dMx, M_inv));
-                var dMy_inv = mul(-M_inv, mul(dMy, M_inv));
+                // force calculation based on stress, individual particle raw velocity
+                for (int i = 0; i < ps.Length; i++) {
+                    var pi = ps[i];
 
-                var dbx = mul(h0, dMx_inv);
-                var dby = mul(h0, dMy_inv);
+                    float2 f = 0;
+                    float m = 0;
+                    float2 distributionDelta = float2(0, 0);
+                    
+                    for (int k = 0; k < pi.num_neighbours; ++k) {
+                        var idx_into_neighbours = i * max_neighbours + k;
+                        var j = neighbour_idxs[idx_into_neighbours];
+                        var pj = ps[j];
 
-                pi.dbx = dbx;
-                pi.dby = dby;
+                        var b = pj.b;
+                        var σj = pj.σ;
 
-                pi.b = b;
-                ps[i] = pi;
-            }
+                        var dbx = pj.dbx;
+                        var dby = pj.dby;
 
-            /* calculate velocity gradient ∇u from Eqn. (18), update
-            deformation gradient F_n+1 = (I + (∇u_n+1 )^T Δt)F_n
-            following Eqn. (17); */
+                        float2 dx = (pi.x - pj.x) / a;
+                        float3 h = float3(1, dx.x, dx.y);
 
-            // calculate stress per-particle
-            for (int i = 0; i < ps.Length; i++) {
-                var pi = ps[i];
+                        // shape function for pi at neighbour sample point j
+                        float N = dot(b, h) * Φ(dx) * pi.volume;
+                        float2 dN = ((float2(dot(dbx, h), dot(dby, h)) - float2(b[1], b[2]) / a) * Φ(dx) - dot(b, h) * dΦ(dx) / a) * pi.volume;
 
-                var F = pi.F;
-                var J = determinant(F);
-                var FFT = mul(F, transpose(F));
-                var I = float2x2(1, 0, 0, 1);
+                        f += -mul(dN, σj * pj.volume);
+                        var rho_j = pj.mass / pj.volume;
+                        m += N * rho_j * pj.volume;
 
-                // eq. 22
-                var σ = (1.0f / J) * (mu * (FFT - I) + lambda * log(J) * I);
-                pi.σ = σ;
-
-                ps[i] = pi;
-            }
-
-            // force calculation based on stress, individual particle raw velocity
-            for (int i = 0; i < ps.Length; i++) {
-                var pi = ps[i];
-
-                float2 f = 0;
-                float m = 0;
-                float2 distributionDelta = float2(0, 0);
-                
-                for (int k = 0; k < pi.num_neighbours; ++k) {
-                    var idx_into_neighbours = i * max_neighbours + k;
-                    var j = neighbour_idxs[idx_into_neighbours];
-                    var pj = ps[j];
-
-                    var b = pj.b;
-                    var σj = pj.σ;
-
-                    var dbx = pj.dbx;
-                    var dby = pj.dby;
-
-                    float2 dx = (pi.x - pj.x) / a;
-                    float3 h = float3(1, dx.x, dx.y);
-
-                    // shape function for pi at neighbour sample point j
-                    float N = dot(b, h) * Φ(dx) * pi.volume;
-                    float2 dN = ((float2(dot(dbx, h), dot(dby, h)) - float2(b[1], b[2]) / a) * Φ(dx) - dot(b, h) * dΦ(dx) / a) * pi.volume;
-
-                    f += -mul(dN, σj * pj.volume);
-                    var rho_j = pj.mass / pj.volume;
-                    m += N * rho_j * pj.volume;
-
-                    if (length(pi.x - pj.x) < 1.5f * a && length(pi.xPrev - pj.xPrev) < 1.5f * a) {
-                        // Asbj: I use particle centers as center of mass, though it's not really correct, but it means we don't need to compute the mass centers.
-                        float2 combinedDelta = (mul(pj.Z, pi.xPrev - pj.xPrev) - mul(pi.Z, pj.xPrev - pi.xPrev)) * 0.5f - (pi.x - pj.x);
-                        distributionDelta += combinedDelta * 2.0f * 0.15f * Φ(dx);
+                        if (length(pi.x - pj.x) < 1.5f * a && length(pi.xPrev - pj.xPrev) < 1.5f * a) {
+                            // Asbj: I use particle centers as center of mass, though it's not really correct, but it means we don't need to compute the mass centers.
+                            float2 combinedDelta = (mul(pj.Z, pi.xPrev - pj.xPrev) - mul(pi.Z, pj.xPrev - pi.xPrev)) * 0.5f - (pi.x - pj.x);
+                            distributionDelta += combinedDelta * 2.0f * 0.15f * Φ(dx);
+                        }
                     }
+
+                    pi.xDelta += (f / m) * dt * dt;
+                    pi.xDelta += distributionDelta;
+
+                    ps[i] = pi;
                 }
 
-                pi.xDelta += (f / m) * dt * dt;
-                pi.xDelta += distributionDelta;
-
-                ps[i] = pi;
+                for (int i = 0; i < ps.Length; i++) {
+                    var pi = ps[i];
+                    pi.x += pi.xDelta;
+                    pi.xDelta = float2(0, 0);
+                    ps[i] = pi;
+                }
             }
 
             // PBD - update velocity.
             for (int i = 0; i < ps.Length; i++) {
                 var pi = ps[i];
 
-                pi.x += pi.xDelta;
                 pi.v = (pi.x - pi.xPrev) / dt;
 
                 ps[i] = pi;
