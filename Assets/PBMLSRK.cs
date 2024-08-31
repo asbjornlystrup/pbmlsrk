@@ -11,8 +11,8 @@ using UnityEngine.Jobs;
 using System.Collections.Generic;
 using static Unity.Mathematics.math;
 
-public class MLSRK : MonoBehaviour {
-    
+public class PBMLSRK : MonoBehaviour {
+
     public struct Particle {
         public float2 x;
         public float2 v;
