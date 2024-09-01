@@ -47,6 +47,8 @@ public class PBMLSRK : MonoBehaviour {
     readonly static float2 f_ext = float2(0, 1 * -0.01f);
 
     const float a = 1.5f; // this is like 'smoothing length' from SPH
+    const float poly6Constant = 4.0f / (math.PI * (a * a * a * a) * (a * a * a * a));
+    const float spikyGradConstant = 30.0f / (math.PI * (a * a * a * a * a)); // Omitting the minus
     
     // elasticity params for NeoHookean
     const float E = 2.0f;          // Young's Modulus
@@ -77,6 +79,16 @@ public class PBMLSRK : MonoBehaviour {
     // all the shape functions / spline stuff, and their derivatives. the original paper implementation used cubic splines,
     // but i've found quadratic splines to be sufficient + fast
 
+    static float LengthSq(float2 v) { return v.x * v.x + v.y * v.y; }
+    static float Poly6(float lenSq) {
+        float term = (a * a - lenSq);
+        return term * term * term * poly6Constant;
+    }
+    static float SpikyGrad(float len) {
+        float term = (a - len);
+        return term * term * spikyGradConstant * 0.8f;
+    }
+
     static float quadratic_spline(float x) {
         var t = abs(x);
         if (t < 0.5f) return 0.75f - t * t;
@@ -91,10 +103,13 @@ public class PBMLSRK : MonoBehaviour {
         return x > 0 ? t : -t;
     }
     static float Φ(float2 x) {
-        return quadratic_spline(x.x) * quadratic_spline(x.y);
+        return (Poly6(LengthSq(x))) * 1.0f;
+        //return quadratic_spline(x.x) * quadratic_spline(x.y);
     }
     static float2 dΦ(float2 x) {
-        return float2(d_quadratic_spline(x.x) * quadratic_spline(x.y), quadratic_spline(x.x) * d_quadratic_spline(x.y));
+        float len = length(x);
+        return -(SpikyGrad(len)) * (len == 0.0 ? x : normalize(x)) * 1.0f;
+        //return float2(d_quadratic_spline(x.x) * quadratic_spline(x.y), quadratic_spline(x.x) * d_quadratic_spline(x.y));
     }
     #endregion
 
